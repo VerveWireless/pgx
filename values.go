@@ -1019,8 +1019,12 @@ func Encode(wbuf *WriteBuf, oid Oid, arg interface{}) error {
 		return encodeBoolSlice(wbuf, oid, arg)
 	case int:
 		return encodeInt(wbuf, oid, arg)
+	case []int:
+		return encodeIntSlice(wbuf, oid, arg)
 	case uint:
 		return encodeUInt(wbuf, oid, arg)
+	case []uint:
+		return encodeUIntSlice(wbuf, oid, arg)
 	case Char:
 		return encodeChar(wbuf, oid, arg)
 	case AclItem:
@@ -1233,6 +1237,10 @@ func Decode(vr *ValueReader, d interface{}) error {
 		*v = decodeAclItemArray(vr)
 	case *[]bool:
 		*v = decodeBoolArray(vr)
+	case *[]int:
+		*v = decodeIntArrayToInt(vr)
+	case *[]uint:
+		*v = decodeIntArrayToUInt(vr)
 	case *[]int16:
 		*v = decodeInt2Array(vr)
 	case *[]uint16:
@@ -1496,6 +1504,20 @@ func encodeInt(w *WriteBuf, oid Oid, value int) error {
 	return nil
 }
 
+func encodeIntSlice(w *WriteBuf, oid Oid, slice []int) error {
+	if oid != Int8ArrayOid {
+		return fmt.Errorf("cannot encode Go %s into oid %d", "[]int", oid)
+	}
+
+	encodeArrayHeader(w, Int8Oid, len(slice), 12)
+	for _, v := range slice {
+		w.WriteInt32(8)
+		w.WriteInt64(int64(v))
+	}
+
+	return nil
+}
+
 func encodeUInt(w *WriteBuf, oid Oid, value uint) error {
 	switch oid {
 	case Int2Oid:
@@ -1520,6 +1542,24 @@ func encodeUInt(w *WriteBuf, oid Oid, value uint) error {
 
 	default:
 		return fmt.Errorf("cannot encode %s into oid %v", "uint8", oid)
+	}
+
+	return nil
+}
+
+func encodeUIntSlice(w *WriteBuf, oid Oid, slice []uint) error {
+	if oid != Int8ArrayOid {
+		return fmt.Errorf("cannot encode Go %s into oid %d", "[]uint", oid)
+	}
+
+	encodeArrayHeader(w, Int8Oid, len(slice), 12)
+	for _, v := range slice {
+		if v <= math.MaxInt64 {
+			w.WriteInt32(8)
+			w.WriteInt64(int64(v))
+		} else {
+			return fmt.Errorf("%d is greater than max bigint %d", v, int64(math.MaxInt64))
+		}
 	}
 
 	return nil
@@ -2517,6 +2557,89 @@ func encodeByteSliceSlice(w *WriteBuf, oid Oid, value [][]byte) error {
 	}
 
 	return nil
+}
+
+func decodeIntArrayToInt(vr *ValueReader) []int {
+	if vr.Len() == -1 {
+		return nil
+	}
+
+	if vr.Type().DataType != Int8ArrayOid {
+		vr.Fatal(ProtocolError(fmt.Sprintf("Cannot decode oid %v into []int", vr.Type().DataType)))
+		return nil
+	}
+
+	if vr.Type().FormatCode != BinaryFormatCode {
+		vr.Fatal(ProtocolError(fmt.Sprintf("Unknown field description format code: %v", vr.Type().FormatCode)))
+		return nil
+	}
+
+	numElems, err := decode1dArrayHeader(vr)
+	if err != nil {
+		vr.Fatal(err)
+		return nil
+	}
+
+	a := make([]int, int(numElems))
+	for i := 0; i < len(a); i++ {
+		elSize := vr.ReadInt32()
+		switch elSize {
+		case 8:
+			a[i] = int(vr.ReadInt64())
+		case -1:
+			vr.Fatal(ProtocolError("Cannot decode null element"))
+			return nil
+		default:
+			vr.Fatal(ProtocolError(fmt.Sprintf("Received an invalid size for an int8 element: %d", elSize)))
+			return nil
+		}
+	}
+
+	return a
+}
+
+func decodeIntArrayToUInt(vr *ValueReader) []uint {
+	if vr.Len() == -1 {
+		return nil
+	}
+
+	if vr.Type().DataType != Int8ArrayOid {
+		vr.Fatal(ProtocolError(fmt.Sprintf("Cannot decode oid %v into []uint", vr.Type().DataType)))
+		return nil
+	}
+
+	if vr.Type().FormatCode != BinaryFormatCode {
+		vr.Fatal(ProtocolError(fmt.Sprintf("Unknown field description format code: %v", vr.Type().FormatCode)))
+		return nil
+	}
+
+	numElems, err := decode1dArrayHeader(vr)
+	if err != nil {
+		vr.Fatal(err)
+		return nil
+	}
+
+	a := make([]uint, int(numElems))
+	for i := 0; i < len(a); i++ {
+		elSize := vr.ReadInt32()
+		switch elSize {
+		case 8:
+			tmp := vr.ReadInt64()
+			if tmp < 0 {
+				vr.Fatal(ProtocolError(fmt.Sprintf("%d is less than zero for uint64", tmp)))
+				return nil
+			}
+			a[i] = uint(tmp)
+		case -1:
+			vr.Fatal(ProtocolError("Cannot decode null element"))
+			return nil
+		default:
+			vr.Fatal(ProtocolError(fmt.Sprintf("Received an invalid size for an int8 element: %d", elSize)))
+			return nil
+		}
+	}
+
+	return a
 }
 
 func decodeInt2Array(vr *ValueReader) []int16 {
